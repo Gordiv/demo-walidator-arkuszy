@@ -67,6 +67,8 @@ opisane po polsku, wszystkie naraz, z podpowiedzią („Nieznane pole „wymagny
 
 ### Gotowy program (.exe)
 
+Pobierz `WalidatorArkuszy-1.0.0-windows.zip` z zakładki
+[Releases](https://github.com/Gordiv/demo-walidator-arkuszy/releases/latest) i rozpakuj.
 Folder `WalidatorArkuszy` zawiera dwa programy (nie wymagają instalacji Pythona):
 
 - `WalidatorArkuszy.exe` – okno programu,
