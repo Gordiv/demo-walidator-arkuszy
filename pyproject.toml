@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "walidator-arkuszy"
+version = "1.0.0"
+description = "Walidator arkuszy: sprawdzanie i czyszczenie danych z plików XLSX i CSV z raportem HTML"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gordiv" }]
+requires-python = ">=3.12"
+dependencies = [
+    "python-calamine>=0.9,<1",
+    "XlsxWriter>=3.2,<4",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Natural Language :: Polish",
+    "Topic :: Office/Business",
+]
+
+[project.optional-dependencies]
+gui = [
+    "customtkinter>=5.2",
+    "tkinterdnd2>=0.4",
+]
+dev = [
+    "python-calamine==0.9.1",
+    "XlsxWriter==3.3.4",
+    "customtkinter==6.0.0",
+    "tkinterdnd2==0.7.0",
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.6",
+    "pyinstaller==6.22.3",
+    "pillow==13.0.0",
+]
+
+[project.scripts]
+walidator = "walidator.cli:main"
+
+[project.gui-scripts]
+walidator-gui = "walidator.gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "C4", "PTH", "RET", "PL"]
+ignore = [
+    "PLR0911", # many returns are clearer in small parsers
+    "PLR0913",
+    "PLR2004", # magic values in parsers are documented by context
+    "RUF001",  # Polish typographic quotes in user-facing strings are intended
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "PLC0415"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["walidator"]
+omit = ["*/walidator/gui/*", "*/__main__.py"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
