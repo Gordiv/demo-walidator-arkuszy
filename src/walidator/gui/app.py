@@ -76,6 +76,7 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
         self.rules_name: str | None = None
         self.result: RunResult | None = None
         self.busy = False
+        self.auto_output_dir = ""  # the folder last filled in automatically
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -261,7 +262,7 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
         self.format_switch.grid(row=3, column=0, sticky="ew", pady=(4, 10))
         keyboard_segmented(self.format_switch, lambda _value: None)
 
-        self._caption(form, "Podobne rekordy (literówki, wielkość liter) wg kolumny").grid(
+        self._caption(form, "Podobne zapisy (wielkość liter, polskie znaki) wg kolumny").grid(
             row=4, column=0, sticky="w"
         )
         self.key_menu = ctk.CTkOptionMenu(
@@ -439,18 +440,21 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
         return "copy"
 
     def open_file(self, path: Path) -> None:
-        self.file = path
-        self.result = None
-        self._show_result(None)
-        if not self.output_dir.get():
-            self.output_dir.set(str(path.resolve().parent / "wynik"))
+        """Loads a file in the background; the window changes only when loading succeeds."""
+        rules = self.loaded_rules
         self._start_task(
-            "Wczytywanie pliku…", lambda: analyze(path, rules=self.loaded_rules), self._file_loaded
+            "Wczytywanie pliku…", lambda: analyze(path, rules=rules), self._file_loaded
         )
 
     def _file_loaded(self, analysis: Analysis) -> None:
-        self.analysis = analysis
         info = analysis.info
+        self.file, self.analysis = info.path, analysis
+        self.result = None
+        self._show_result(None)
+        # A folder picked or typed by the user stays; the default follows the opened file.
+        if self.output_dir.get().strip() in ("", self.auto_output_dir):
+            self.auto_output_dir = str(info.path.resolve().parent / "wynik")
+            self.output_dir.set(self.auto_output_dir)
         rows = info.estimated_rows
         size = f"ok. {num(rows)} wierszy" if rows else ""
         details = " · ".join(filter(None, [info.description, size, f"{len(info.headers)} kolumn"]))
@@ -483,14 +487,25 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
 
     def _load_rules_file(self, path: Path) -> None:
         try:
-            self.loaded_rules = load_rules(path)
+            rules = load_rules(path)
         except WalidatorError as error:
             messagebox.showerror("Nie można wczytać reguł", str(error), parent=self)
             return
-        self.rules_name = path.name
-        self.rules_label.configure(text=f"reguły: {path.name}")
-        if self.file:
-            self.open_file(self.file)
+
+        def use_rules() -> None:
+            self.loaded_rules, self.rules_name = rules, path.name
+            self.rules_label.configure(text=f"reguły: {path.name}")
+
+        if self.file is None:
+            use_rules()
+            return
+        file = self.file
+
+        def loaded(analysis: Analysis) -> None:  # the rules are kept only if they fit the file
+            use_rules()
+            self._file_loaded(analysis)
+
+        self._start_task("Wczytywanie reguł…", lambda: analyze(file, rules=rules), loaded)
 
     def save_rules(self) -> None:
         rules = self._rules_from_form()
@@ -610,7 +625,8 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
                     self._finish_task(*payload)
         except queue.Empty:
             pass
-        self.after(POLL_MS, self._poll_events)
+        finally:  # an error in a callback must not stop the polling (the window would hang)
+            self.after(POLL_MS, self._poll_events)
 
     def _finish_task(self, future: Future[Any], done: Callable[[Any], None]) -> None:
         self.busy = False
@@ -620,7 +636,7 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
         try:
             value = future.result()
         except CancelledError:
-            self._set_progress(0, "Przerwano. Pliki częściowe zostały usunięte.")
+            self._set_progress(0, "Przerwano. Poprzednie wyniki nie zostały zmienione.")
         except WalidatorError as error:
             self._set_progress(0, "Nie udało się – szczegóły w komunikacie.")
             messagebox.showerror(APP_NAME, str(error), parent=self)
@@ -629,7 +645,11 @@ class App(ctk.CTk, DnDWrapper):  # type: ignore[misc]
             self._set_progress(0, "Wystąpił nieoczekiwany błąd.")
             messagebox.showerror(APP_NAME, _unexpected_message(), parent=self)
         else:
-            done(value)
+            try:
+                done(value)
+            finally:
+                self._refresh_buttons()
+            return
         self._refresh_buttons()
 
     def _set_progress(self, fraction: float | None, text: str) -> None:

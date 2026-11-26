@@ -1,5 +1,5 @@
 import sys
 
-from walidator.gui.app import main
+from walidator.gui import main
 
 sys.exit(main())

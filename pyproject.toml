@@ -24,8 +24,8 @@ classifiers = [
 
 [project.optional-dependencies]
 gui = [
-    "customtkinter>=5.2",
-    "tkinterdnd2>=0.4",
+    "customtkinter>=6,<7",
+    "tkinterdnd2>=0.4,<1",
 ]
 dev = [
     "python-calamine==0.9.1",
@@ -43,10 +43,13 @@ dev = [
 walidator = "walidator.cli:main"
 
 [project.gui-scripts]
-walidator-gui = "walidator.gui.app:main"
+walidator-gui = "walidator.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"walidator.gui" = ["ikona.ico"]
 
 [tool.ruff]
 line-length = 100
