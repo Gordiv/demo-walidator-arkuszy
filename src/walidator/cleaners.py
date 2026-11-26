@@ -36,6 +36,15 @@ def as_text(value: object) -> str:
     return str(value)
 
 
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """Polish plural forms: 1 wiersz, 2 wiersze, 5 wierszy, 22 wiersze."""
+    if count == 1:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
 def apply_case(text: str, case: TextCase) -> str:
     match case:
         case TextCase.LOWER:

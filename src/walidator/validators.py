@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from walidator.cleaners import as_text
 from walidator.model import ColumnType
@@ -63,6 +63,22 @@ def _unify_separators(text: str) -> str:
     return text.replace(",", ".")
 
 
+EXCEL_DIGITS = 15  # Excel keeps 15 significant digits of a number
+
+
+def is_digit_identifier(value: object) -> bool:
+    """True for digit strings that are labels, not amounts: "000123", PESEL, account numbers.
+
+    As numbers they would lose information: the leading zero or digits beyond Excel's 15.
+    """
+    if not isinstance(value, str):
+        return False
+    digits = _NUMBER_NOISE.sub("", value)
+    if not digits.isdigit():
+        return False
+    return len(digits) > EXCEL_DIGITS or (digits[0] == "0" and len(digits) > 1)
+
+
 def parse_integer(value: object) -> int:
     """Reads whole numbers; "1 200" and "1.200" (Polish thousands) both give 1200."""
     if isinstance(value, bool):
@@ -80,13 +96,16 @@ def parse_integer(value: object) -> int:
 
 
 def round_decimal(number: Decimal, places: int) -> Decimal:
-    return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    try:
+        return number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    except InvalidOperation as error:
+        raise InvalidValue(NUMBER_ERROR, "Liczba ma za dużo cyfr, by ją zaokrąglić") from error
 
 
 # --- dates -----------------------------------------------------------------------------------
 
 DATE_ERROR = "Niepoprawna data"
-_TIME = r"(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+_TIME = r"(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?"
 _ISO_DATE = re.compile(rf"^(\d{{4}})[-./](\d{{1,2}})[-./](\d{{1,2}}){_TIME}$")
 _DAY_FIRST = re.compile(rf"^(\d{{1,2}})[-./](\d{{1,2}})[-./](\d{{4}}){_TIME}$")
 _SHORT_YEAR = re.compile(r"^\d{1,2}[-./]\d{1,2}[-./]\d{2}$")
@@ -109,16 +128,21 @@ _MONTHS = {name: number for number, names in enumerate(_MONTH_NAMES, 1) for name
 
 
 def parse_date(value: object) -> date:
-    """Reads 01.02.2026, 1/2/2026, 2026-02-01 or "1 lutego 2026" (the day comes first)."""
+    """Reads 01.02.2026, 1/2/2026, 2026-02-01 or "1 lutego 2026" (the day comes first).
+
+    A time of day is checked but not kept; :func:`has_time` tells whether there was one.
+    """
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
     text = as_text(value).strip()
     if match := _ISO_DATE.match(text):
-        year, month, day = (int(part) for part in match.groups())
+        year, month, day = (int(part) for part in match.groups()[:3])
+        _check_time(match, text)
     elif match := _DAY_FIRST.match(text):
-        day, month, year = (int(part) for part in match.groups())
+        day, month, year = (int(part) for part in match.groups()[:3])
+        _check_time(match, text)
     elif match := _WORDS_DATE.match(text.lower()):
         day, year = int(match[1]), int(match[3])
         month = _MONTHS.get(match[2], 0)
@@ -129,6 +153,21 @@ def parse_date(value: object) -> date:
     else:
         raise InvalidValue(DATE_ERROR, f"„{text}” nie wygląda jak data")
     return _build_date(year, month, day, text)
+
+
+def _check_time(match: re.Match[str], text: str) -> None:
+    hour, minute, second = (int(part or 0) for part in match.groups()[3:])
+    if hour > 23 or minute > 59 or second > 59:
+        raise InvalidValue(DATE_ERROR, f"Niepoprawna godzina: {text}")
+
+
+def has_time(value: object) -> bool:
+    """True when a date cell carries a time of day other than midnight."""
+    if isinstance(value, datetime):
+        return value.time() != datetime.min.time()
+    text = as_text(value).strip()
+    match = _ISO_DATE.match(text) or _DAY_FIRST.match(text)
+    return bool(match and any(int(part or 0) for part in match.groups()[3:]))
 
 
 def _build_date(year: int, month: int, day: int, text: str) -> date:
@@ -176,8 +215,20 @@ PHONE_ERROR = "Niepoprawny telefon"
 _PHONE_NOISE = re.compile(r"[\s\-().\/\u00a0]")
 
 
+# Two-digit area codes of Polish landlines; other numbers are written in groups of three.
+LANDLINE_AREA_CODES = frozenset({
+    "12", "13", "14", "15", "16", "17", "18", "22", "23", "24", "25", "29", "32", "33", "34", "41",
+    "42", "43", "44", "46", "48", "52", "54", "55", "56", "58", "59", "61", "62", "63", "65", "67",
+    "68", "71", "74", "75", "76", "77", "81", "82", "83", "84", "85", "86", "87", "89", "91", "94",
+    "95",
+})  # fmt: skip
+
+
 def parse_phone(value: object) -> str:
-    """Accepts Polish numbers with or without +48 / 0048 and returns "+48 600 123 456"."""
+    """Accepts Polish numbers with or without +48 / 0048.
+
+    Returns "+48 600 123 456" for mobile numbers and "+48 22 123 45 67" for landlines.
+    """
     digits = _PHONE_NOISE.sub("", as_text(value))
     if digits.startswith("+") and not digits.startswith("+48"):
         raise InvalidValue(PHONE_ERROR, f"Numer zagraniczny ({digits[:3]}…), oczekiwano polskiego")
@@ -191,6 +242,8 @@ def parse_phone(value: object) -> str:
         raise InvalidValue(PHONE_ERROR, f"Numer ma {len(digits)} cyfr zamiast 9")
     if digits[0] == "0":
         raise InvalidValue(PHONE_ERROR, "Numer nie może zaczynać się od 0")
+    if digits[:2] in LANDLINE_AREA_CODES:
+        return f"+48 {digits[:2]} {digits[2:5]} {digits[5:7]} {digits[7:]}"
     return f"+48 {digits[:3]} {digits[3:6]} {digits[6:]}"
 
 
@@ -229,6 +282,8 @@ def parse_nip(value: object) -> str:
         raise InvalidValue(NIP_ERROR, "NIP może zawierać tylko cyfry")
     if len(text) != 10:
         raise InvalidValue(NIP_ERROR, f"NIP musi mieć 10 cyfr (ma {len(text)})")
+    if len(set(text)) == 1:
+        raise InvalidValue(NIP_ERROR, "NIP nie może składać się z samych takich samych cyfr")
     if not nip_checksum_ok(text):
         raise InvalidValue(NIP_ERROR, "Zła cyfra kontrolna NIP")
     return text

@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 from walidator.cleaners import apply_case, as_text, clean_whitespace, fold_key
 from walidator.model import ColumnRule, ColumnType
-from walidator.validators import PARSERS, InvalidValue, format_value, round_decimal
+from walidator.validators import PARSERS, InvalidValue, format_value, has_time, round_decimal
 
 MISSING = "Brak wymaganej wartości"
 OUT_OF_RANGE = "Wartość spoza zakresu"
@@ -29,6 +29,7 @@ class Cell(NamedTuple):
     text: str  # value as written to CSV and shown in the report
     changed: bool
     error: InvalidValue | None
+    time_dropped: bool = False  # a date cell had a time of day, only the date is kept
 
 
 class ColumnProcessor:
@@ -58,11 +59,17 @@ class ColumnProcessor:
                 return Cell(None, "", False, InvalidValue(MISSING, MISSING))
             return Cell(None, "", raw not in (None, ""), None)
         try:
-            value = self._apply_rules(self._parse(prepared))
+            parsed = self._parse(prepared)
+            value = self._apply_rules(parsed)
         except InvalidValue as error:
             return Cell(None, as_text(raw), False, error)
         text = format_value(value, self._separator)
-        return Cell(value, text, is_changed(raw, value, text), None)
+        changed = is_changed(raw, value, text)
+        if changed and isinstance(parsed, Decimal) and value == parsed:
+            # "5" -> "5,00" only pads the decimals of a valid number; that is not a fix
+            changed = is_changed(raw, parsed, format_value(parsed, self._separator))
+        time_dropped = self.rule.type is ColumnType.DATE and has_time(prepared)
+        return Cell(value, text, changed, None, time_dropped)
 
     def _apply_rules(self, value: object) -> object:
         rule = self.rule

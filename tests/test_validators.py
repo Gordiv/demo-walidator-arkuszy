@@ -311,3 +311,35 @@ def test_format_value() -> None:
     assert format_value(True) == "tak"
     assert format_value(None) == ""
     assert format_value(17) == "17"
+
+
+# --- regressions -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("nip", ["0000000000", "1111111111", "PL 999-999-99-99"])
+def test_parse_nip_rejects_identical_digits(nip: str) -> None:
+    assert "takich samych cyfr" in reason_of(parse_nip, nip)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("22 123 45 67", "+48 22 123 45 67"),
+        ("(85) 178 83 65", "+48 85 178 83 65"),
+        ("+48 12 345 67 89", "+48 12 345 67 89"),
+        ("600 123 456", "+48 600 123 456"),
+        ("(66) 079 11 35", "+48 660 791 135"),
+    ],
+)
+def test_parse_phone_formats_landlines_with_area_code(raw: str, expected: str) -> None:
+    assert parse_phone(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["2026-02-01 25:99", "01.02.2026 24:00", "2026-02-01 12:60"])
+def test_parse_date_rejects_impossible_times(raw: str) -> None:
+    assert "godzina" in reason_of(parse_date, raw)
+
+
+def test_round_decimal_rejects_numbers_too_long_to_round() -> None:
+    error = reason_of(lambda value: round_decimal(value, 2), Decimal("1" * 28))
+    assert "za dużo cyfr" in error

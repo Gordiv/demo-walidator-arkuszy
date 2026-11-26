@@ -38,7 +38,7 @@ def test_analyze_detects_columns_and_similarity_key(make_csv) -> None:
     analysis = analyze(make_csv(ROWS))
     types = {name: rule.type for name, rule in analysis.rules.columns.items()}
     assert types == {
-        "ID": ColumnType.INTEGER,
+        "ID": ColumnType.TEXT,  # identifiers are labels, never numbers
         "Firma": ColumnType.TEXT,
         "NIP": ColumnType.NIP,
         "E-mail": ColumnType.EMAIL,

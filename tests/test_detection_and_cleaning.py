@@ -171,3 +171,44 @@ def test_as_text_for_dates() -> None:
     assert as_text(datetime(2026, 2, 1)) == "2026-02-01"
     assert as_text(datetime(2026, 2, 1, 8, 30)) == "2026-02-01 08:30:00"
     assert as_text(date(2026, 2, 1)) == "2026-02-01"
+
+
+# --- identifiers are never numbers -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("header", "values"),
+    [
+        ("PESEL", ["02270803628", "85010112345"]),
+        ("Numer klienta", ["000123", "000124"]),
+        ("ID", ["1", "2", "3"]),
+        ("Nr faktury", ["17", "18"]),
+        ("Konto", ["61109010140000071219812874", "61109010140000071219812875"]),
+        ("Rachunek", ["61 1090 1014 0000 0712 1981 2874"]),
+        ("Kolumna 1", ["0012", "0013"]),
+    ],
+)
+def test_identifier_like_columns_stay_text(header: str, values: list[str]) -> None:
+    assert guess_column(header, values).rule.type is ColumnType.TEXT
+
+
+def test_identifier_column_still_suggests_unique() -> None:
+    assert guess_column("ID klienta", ["000123", "000124"]).rule.unique
+
+
+@pytest.mark.parametrize(
+    ("header", "values", "expected"),
+    [
+        ("Ilość", ["1", "20", "300"], ColumnType.INTEGER),
+        ("X", ["0", "15", "999999999999999"], ColumnType.INTEGER),
+        ("Kwota", ["0,50", "12"], ColumnType.DECIMAL),
+    ],
+)
+def test_ordinary_numbers_are_still_numbers(
+    header: str, values: list[str], expected: ColumnType
+) -> None:
+    assert guess_column(header, values).rule.type is expected
+
+
+def test_number_header_keeps_its_type_despite_a_huge_value() -> None:
+    assert guess_column("Kwota", ["12,50", "1" * 28]).rule.type is ColumnType.DECIMAL

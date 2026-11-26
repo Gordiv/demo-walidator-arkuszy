@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from walidator.cleaners import as_text, clean_whitespace, fold_key
 from walidator.model import ColumnRule, ColumnType, TextCase
-from walidator.validators import accepts
+from walidator.validators import accepts, is_digit_identifier
 
 POLISH_LETTERS = frozenset("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ")
 DELIMITERS = (";", "\t", ",", "|")
@@ -82,8 +82,9 @@ _HEADER_HINTS: tuple[tuple[ColumnType, tuple[str, ...]], ...] = (
     (ColumnType.DATE, ("data", "date", "dzien")),
     (ColumnType.BOOLEAN, ("aktywny", "aktywna", "zgoda", "czy", "vip", "newsletter", "oplacone")),
     (ColumnType.DECIMAL, ("kwota", "cena", "wartosc", "suma", "netto", "brutto", "limit", "saldo")),
-    (ColumnType.INTEGER, ("ilosc", "liczba", "sztuk", "szt", "id", "lp", "nr", "numer", "wiek")),
+    (ColumnType.INTEGER, ("ilosc", "liczba", "sztuk", "szt", "lp", "wiek")),
 )
+_NUMBER_TYPES = frozenset({ColumnType.INTEGER, ColumnType.DECIMAL})
 _TITLE_CASE_WORDS = ("imie", "nazwisko", "miasto", "miejscowosc", "wojewodztwo")
 _MONEY_WORDS = ("kwota", "cena", "wartosc", "suma", "netto", "brutto", "limit", "saldo")
 _IDENTITY_WORDS = ("id", "nr", "numer", "identyfikator", "kod klienta")
@@ -134,12 +135,21 @@ def guess_column(header: str, sample: Sequence[object]) -> ColumnGuess:
     filled = [value for value in values if value != ""]
     hint = header_hint(header)
     words = header_words(header)
+    # Identifiers (ID, Nr, "000123", PESEL, account numbers) are labels: as numbers they
+    # would lose leading zeros or digits beyond Excel's precision, so they stay text.
+    # A number header (Kwota, Ilość) wins over the content: a 28-digit amount is an error there.
+    if _is_identity(words):
+        identifier = True
+        hint = None if hint in _NUMBER_TYPES else hint
+    else:
+        identifier = hint not in _NUMBER_TYPES and any(map(is_digit_identifier, filled))
+    candidates = [kind for kind in _CONTENT_ORDER if not (identifier and kind in _NUMBER_TYPES)]
 
     if hint and (not filled or content_ratio(hint, filled) >= HEADER_THRESHOLD):
         column_type, source = hint, "nagłówek i zawartość" if filled else "nagłówek"
     else:
         column_type = next(
-            (kind for kind in _CONTENT_ORDER if content_ratio(kind, filled) >= CONTENT_THRESHOLD),
+            (kind for kind in candidates if content_ratio(kind, filled) >= CONTENT_THRESHOLD),
             ColumnType.TEXT,
         )
         source = "zawartość" if column_type is not ColumnType.TEXT or filled else "brak danych"
@@ -159,6 +169,10 @@ def guess_column(header: str, sample: Sequence[object]) -> ColumnGuess:
     return ColumnGuess(rule=rule, source=source, fill_ratio=fill_ratio, example=example)
 
 
+def _is_identity(words: list[str]) -> bool:
+    return any(_hint_matches(hint, words) for hint in _IDENTITY_WORDS)
+
+
 def _prepare(value: object) -> object:
     return clean_whitespace(value) if isinstance(value, str) else ("" if value is None else value)
 
@@ -168,9 +182,7 @@ def _suggest_unique(column_type: ColumnType, words: list[str], filled: list[obje
 
     E-mail or NIP are not assumed unique: in an orders file the same buyer appears many times.
     """
-    identity = column_type in {ColumnType.INTEGER, ColumnType.TEXT} and any(
-        word in _IDENTITY_WORDS for word in words
-    )
+    identity = column_type in {ColumnType.INTEGER, ColumnType.TEXT} and _is_identity(words)
     if not identity or not filled:
         return False
     return len({as_text(value) for value in filled}) == len(filled)
