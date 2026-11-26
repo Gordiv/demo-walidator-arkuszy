@@ -1,0 +1,18 @@
+{
+  "wersja": 1,
+  "opis": "Eksport zamówień z systemu sprzedaży (CSV, Windows-1250, średnik)",
+  "usun_duplikaty": true,
+  "kolumny": {
+    "Nr zamówienia": { "typ": "tekst", "wymagane": true, "unikalne": true },
+    "Data zamówienia": { "typ": "data", "wymagane": true, "min": "2025-01-01" },
+    "NIP nabywcy": { "typ": "nip", "wymagane": true },
+    "Nabywca": { "typ": "tekst", "wymagane": true },
+    "E-mail kontaktowy": { "typ": "email" },
+    "Kwota netto": { "typ": "kwota", "wymagane": true, "min": 0.01, "miejsca_po_przecinku": 2 },
+    "Ilość": { "typ": "liczba_calkowita", "wymagane": true, "min": 1, "max": 1000 },
+    "Status": { "typ": "tekst", "wymagane": true, "dozwolone": ["nowe", "opłacone", "wysłane", "anulowane"] },
+    "Kod pocztowy dostawy": { "typ": "kod_pocztowy", "wymagane": true },
+    "Faktura VAT": { "typ": "tak_nie" },
+    "Uwagi": { "typ": "tekst", "max": 200 }
+  }
+}

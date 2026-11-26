@@ -1,0 +1,22 @@
+{
+  "wersja": 1,
+  "opis": "Kartoteka klientów: identyfikatory, dane kontaktowe i limity kredytowe",
+  "usun_duplikaty": true,
+  "klucz_podobienstwa": "Firma",
+  "kolumny": {
+    "ID klienta": { "typ": "liczba_calkowita", "wymagane": true, "unikalne": true, "min": 1 },
+    "Imię": { "typ": "tekst", "wymagane": true, "wielkosc_liter": "tytulowe", "max": 40 },
+    "Nazwisko": { "typ": "tekst", "wymagane": true, "wielkosc_liter": "tytulowe", "max": 60 },
+    "Firma": { "typ": "tekst", "max": 120 },
+    "NIP": { "typ": "nip", "unikalne": true },
+    "E-mail": { "typ": "email", "wymagane": true, "unikalne": true },
+    "Telefon": { "typ": "telefon", "wymagane": true },
+    "Kod pocztowy": { "typ": "kod_pocztowy", "wymagane": true },
+    "Miasto": { "typ": "tekst", "wymagane": true, "wielkosc_liter": "tytulowe" },
+    "Data rejestracji": { "typ": "data", "wymagane": true, "min": "2015-01-01", "max": "2026-12-31" },
+    "Limit kredytowy": { "typ": "kwota", "min": 0, "max": 100000, "miejsca_po_przecinku": 2 },
+    "Strona WWW": { "typ": "url" },
+    "Zgoda marketingowa": { "typ": "tak_nie", "wymagane": true },
+    "Segment": { "typ": "tekst", "wymagane": true, "dozwolone": ["detaliczny", "hurtowy", "partner"] }
+  }
+}
