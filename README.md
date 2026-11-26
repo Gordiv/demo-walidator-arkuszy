@@ -9,6 +9,10 @@ rozpoznaje typy kolumn, poprawia to, co da się poprawić automatycznie, i zapis
 - **plik z odrzuconymi wierszami** – z oryginalnymi wartościami, błędne komórki zaznaczone na czerwono, z kolumną „Powody odrzucenia”,
 - **raport HTML** – jeden samodzielny plik z podsumowaniem, wykresem rodzajów błędów, statystykami kolumn, przykładami poprawek i listą problemów (gotowy do wydruku do PDF).
 
+W plikach CSV tekst zaczynający się od `=`, `+`, `-` lub `@` dostaje na początku apostrof, żeby arkusz nie uruchomił go
+jako formuły (liczby, np. „-12,50”, zostają bez zmian; XLSX zapisuje takie wartości zawsze jako tekst). Wyniki powstają
+najpierw w plikach tymczasowych: jeśli poprzedni wynik jest otwarty w Excelu, program to zgłasza i nie zmienia starych plików.
+
 Program działa jako okno (Windows) i z wiersza poleceń. Oba interfejsy korzystają z tej samej biblioteki.
 
 ![Okno programu po sprawdzeniu pliku klienci.xlsx](docs/zrzuty/okno-jasny.png)
@@ -25,6 +29,9 @@ Program działa jako okno (Windows) i z wiersza poleceń. Oba interfejsy korzyst
 - XLSX (także XLSM, XLS, ODS) i CSV/TXT/TSV.
 - CSV: automatyczne rozpoznanie kodowania (UTF-8 z BOM i bez, Windows-1250, ISO-8859-2) i separatora (`;` `,` tabulator `|`) – także gdy w danych są przecinki dziesiętne.
 - Nagłówek nie musi być w pierwszym wierszu, puste wiersze są pomijane, powtórzone nazwy kolumn dostają numer.
+- Ostrzeżenia w raporcie i w podsumowaniu: plik z mieszanym kodowaniem (znaki „�”), skoroszyt z kilkoma arkuszami
+  (sprawdzany jest pierwszy, inny: `--arkusz`), wiersze z mniejszą liczbą pól niż nagłówek (brakujące pola są puste;
+  wiersze z nadmiarowymi polami są odrzucane).
 
 **Typy kolumn** – wykrywane z nazwy nagłówka i zawartości, do zmiany w oknie lub w pliku reguł:
 
@@ -32,23 +39,29 @@ Program działa jako okno (Windows) i z wiersza poleceń. Oba interfejsy korzyst
 | --- | --- |
 | `tekst` | zbędne spacje; opcjonalnie wielkość liter („NOWE MIASTO NAD PILICĄ” → „Nowe Miasto nad Pilicą”) |
 | `liczba_calkowita` | „1 200”, „1.200”, „12,0” → 1200 / 12 |
-| `kwota` | „1 234,56 zł”, „1.234,56”, „1,234.56” → 1234,56; zaokrąglenie do N miejsc |
-| `data` | 01.02.2026, 1/2/2026, 2026-02-01, „1 lutego 2026” → 2026-02-01; wykrywa 31.02 i zapis MM/DD |
+| `kwota` | „1 234,56 zł”, „1.234,56”, „1,234.56” → 1234,56; zaokrąglenie do N miejsc (samo dopisanie zer, „5” → „5,00”, nie liczy się jako poprawka) |
+| `data` | 01.02.2026, 1/2/2026, 2026-02-01, „1 lutego 2026” → 2026-02-01; wykrywa 31.02, zapis MM/DD i godziny typu 25:99; z daty z godziną zostaje sama data, a raport ostrzega, w ilu komórkach |
 | `email` | małe litery, usuwa spacje i „mailto:”, poprawia przecinek przed domeną; wykrywa brak @, polskie znaki, „..” |
-| `telefon` | polskie numery z +48 / 0048 lub bez → „+48 600 123 456”; za mało cyfr, numer zagraniczny |
+| `telefon` | polskie numery z +48 / 0048 lub bez → komórkowe „+48 600 123 456”, stacjonarne z numerem kierunkowym „+48 22 123 45 67”; za mało cyfr, numer zagraniczny |
 | `kod_pocztowy` | „00950”, „00 950”, liczba 950 z Excela → „00-950” |
-| `nip` | usuwa „PL”, kreski i spacje, sprawdza **cyfrę kontrolną** |
+| `nip` | usuwa „PL”, kreski i spacje, sprawdza **cyfrę kontrolną**, odrzuca same takie same cyfry (0000000000) |
 | `url` | dodaje brakujące https://, małe litery w domenie |
 | `tak_nie` | tak/nie, T/N, 1/0, prawda/fałsz, x → „tak”/„nie” |
+
+**Identyfikatory zostają tekstem:** kolumny typu ID, Nr, Numer oraz wartości z zerem na początku („000123”, PESEL)
+lub dłuższe niż 15 cyfr (numery kont) nie są zamieniane na liczby, więc zera i wszystkie cyfry zostają
+(wyjątek: nagłówek wskazujący liczbę, np. „Kwota” – tam taka wartość jest błędem).
+Liczby dłuższe niż 15 cyfr (ustawione ręcznie jako liczba) trafiają do XLSX jako tekst, bo Excel zaokrągliłby je.
 
 **Reguły dla kolumny:** wymagane, unikalne, min/max (liczby, daty, długość tekstu), lista dozwolonych wartości
 (dopasowanie bez względu na wielkość liter, zapis ujednolicony do wersji z listy), wielkość liter, liczba miejsc po przecinku.
 
-**Duplikaty:** identyczne wiersze (po oczyszczeniu) są usuwane – zostaje pierwszy. **Podobne rekordy** według wybranej kolumny
-(np. „Zielony Kłos Sp. z o.o.” i „ZIELONY KŁOS SP Z OO”) są pokazywane w raporcie do sprawdzenia.
+**Duplikaty:** identyczne wiersze (po oczyszczeniu) są usuwane – zostaje pierwszy. **Podobne zapisy** według wybranej kolumny –
+wartości równe po pominięciu wielkości liter, polskich znaków, spacji, interpunkcji i formy prawnej (np. „Zielony Kłos Sp. z o.o.”
+i „ZIELONY KŁOS SP Z OO”) – są pokazywane w raporcie do sprawdzenia. To nie jest wyszukiwanie literówek.
 
 **Reguły w pliku JSON** – raz ustawione sprawdzenie można powtarzać na kolejnych plikach. Błędy w pliku reguł są
-opisane po polsku, wszystkie naraz, z podpowiedzią („Nieznane pole „wymagny” – czy chodziło o „wymagane”?”).
+opisane po polsku, wszystkie naraz, z podpowiedzią („Nieznane pole „wymagny” w kolumnie „NIP”. Czy chodziło o „wymagane”?”).
 
 ## Uruchomienie
 
@@ -72,14 +85,16 @@ py -3.14 -m venv .venv
 .venv\Scripts\walidator przyklady\klienci.xlsx       # wiersz poleceń
 ```
 
-Sam rdzeń z wierszem poleceń: `pip install -e .`; z oknem: `pip install -e ".[gui]"`.
+Sam rdzeń z wierszem poleceń: `pip install -e .`; z oknem: `pip install -e ".[gui]"` (bez tego `walidator-gui`
+wyświetla komunikat z tym poleceniem).
 
 ## Okno programu
 
 1. **Plik z danymi** – „Wybierz plik…” albo przeciągnij plik do okna.
 2. **Kolumny i reguły** – wykryty typ każdej kolumny (lista do zmiany), „Wymagane”, „Unikalne”, przykład wartości
    i informacja, skąd wziął się typ (nagłówek, zawartość, plik reguł). „Wczytaj reguły…” / „Zapisz reguły…”.
-3. **Wynik** – folder, format, kolumna do szukania podobnych rekordów, usuwanie duplikatów, raport HTML.
+3. **Wynik** – folder (domyślnie `wynik` obok każdego otwartego pliku; folder wybrany ręcznie zostaje), format,
+   kolumna do szukania podobnych zapisów, usuwanie duplikatów, raport HTML.
 4. **Sprawdź i wyczyść** – praca w tle z paskiem postępu (okno nie zamarza, Esc przerywa), potem podsumowanie
    i przyciski „Otwórz raport”, „Otwórz wynik”, „Pokaż folder”.
 
@@ -173,13 +188,15 @@ jest wynik w CSV (`--format csv`).
 ## Testy i jakość kodu
 
 ```powershell
-.venv\Scripts\python -m pytest --cov          # 249 testów, pokrycie rdzenia 97 %
+.venv\Scripts\python -m pytest --cov          # 320 testów, pokrycie rdzenia 97 %
 .venv\Scripts\ruff check . ; .venv\Scripts\ruff format --check .
 ```
 
 Testy obejmują walidatory (w tym sumę kontrolną NIP), parsowanie telefonów, kodów, dat i kwot, wykrywanie
 kodowania i separatora, reguły JSON i ich komunikaty, duplikaty i podobne rekordy, zapis CSV/XLSX, raport HTML
-(m.in. czy dane są poprawnie zabezpieczone przed wstrzyknięciem HTML), kody wyjścia CLI oraz pełne przejście na plikach przykładowych.
+(m.in. czy dane są poprawnie zabezpieczone przed wstrzyknięciem HTML), ochronę CSV przed formułami, zachowanie zer wiodących
+i długich numerów, zablokowane pliki wyniku, stan okna po wczytaniu pliku, kody wyjścia CLI oraz pełne przejście
+na plikach przykładowych.
 
 ## Budowanie .exe
 
@@ -224,16 +241,23 @@ Okno nie zawiera logiki sprawdzania – zbiera ustawienia, uruchamia `engine.run
 | [XlsxWriter](https://github.com/jmcnamara/XlsxWriter) | zapis XLSX | BSD-2-Clause |
 | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) | wygląd okna | MIT |
 | [tkinterdnd2](https://github.com/Eliav2/tkinterdnd2) | przeciąganie plików do okna | MIT |
+| [darkdetect](https://github.com/albertosottile/darkdetect) | motyw systemu (zależność CustomTkinter) | BSD-3-Clause |
+| [packaging](https://github.com/pypa/packaging) | zależność CustomTkinter | Apache-2.0 / BSD-2-Clause |
 | [pytest](https://pytest.org), pytest-cov | testy | MIT |
 | [Ruff](https://github.com/astral-sh/ruff) | formatowanie i lint | MIT |
 | [PyInstaller](https://pyinstaller.org) | budowanie .exe (tylko narzędzie) | GPL-2.0 z wyjątkiem dla bootloadera |
 | [Pillow](https://python-pillow.org) | rysowanie ikony (tylko narzędzie) | MIT-CMU |
 
 Pozostałe elementy (raport, wykresy, walidatory) korzystają wyłącznie z biblioteki standardowej Pythona.
+Folder z plikami `.exe` zawiera też interpreter Pythona (licencja PSF) oraz Tcl/Tk i tkdnd – każdy na własnej licencji,
+której tekst jest w dystrybucji danego projektu.
 
 ## Ograniczenia
 
 - Zapis XLSX jest kilka razy wolniejszy niż CSV (ok. 5 tys. wierszy/s) – dla plików powyżej ~100 tys. wierszy lepiej wybrać CSV.
+  Arkusz XLSX mieści 1 048 576 wierszy: przy większym wyniku program przerywa z komunikatem, by wybrać CSV.
+  Tekst dłuższy niż 32 767 znaków jest w XLSX skracany (z ostrzeżeniem); CSV zachowuje go w całości.
+- Sprawdzany jest jeden arkusz skoroszytu (domyślnie pierwszy); w oknie nie ma wyboru arkusza, w wierszu poleceń służy do tego `--arkusz`.
 - Daty w formacie z ukośnikami są czytane jako dzień/miesiąc (polski zapis); daty amerykańskie są wykrywane tylko, gdy „miesiąc” jest większy niż 12.
 - Telefony: obsługiwane są numery polskie; numery zagraniczne są odrzucane z odpowiednim powodem.
 - Liczba wierszy pokazywana przed sprawdzeniem jest szacunkowa (liczba linii pliku); dokładna jest w podsumowaniu.
