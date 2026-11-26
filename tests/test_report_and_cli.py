@@ -152,3 +152,68 @@ def test_cli_unexpected_error_points_to_log(
     error = capsys.readouterr().err
     assert "Nieoczekiwany błąd" in error
     assert "awaria" not in error
+
+
+# --- regressions -----------------------------------------------------------------------------
+
+
+def test_cli_save_rules_to_a_folder_is_a_polish_error(
+    make_csv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main([str(make_csv(GOOD)), "--tylko-analiza", "--zapisz-reguly", str(tmp_path)])
+    assert code == EXIT_ERROR
+    error = capsys.readouterr().err
+    assert "to folder" in error
+    assert "Nieoczekiwany" not in error
+
+
+def test_cli_save_rules_to_a_missing_folder_is_a_polish_error(
+    make_csv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "brak" / "reguly.json"
+    assert main([str(make_csv(GOOD)), "--zapisz-reguly", str(target)]) == EXIT_ERROR
+    assert "nie istnieje" in capsys.readouterr().err
+
+
+def test_cli_quiet_and_verbose_conflict_is_polish(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["a.csv", "-q", "-v"])
+    error = capsys.readouterr().err
+    assert "nie można łączyć" in error
+    assert "not allowed" not in error
+
+
+def test_cli_verbose_reads_the_file_once(
+    make_csv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from walidator import engine
+
+    opened: list[object] = []
+    original = engine.open_table
+
+    def counting(*args: object) -> object:
+        opened.append(args)
+        return original(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(engine, "open_table", counting)
+    rules = tmp_path / "r.json"
+    main([str(make_csv(BAD)), "-o", str(tmp_path / "w"), "-v", "--zapisz-reguly", str(rules)])
+    assert len(opened) == 1
+    assert rules.is_file()
+
+
+def test_cli_summary_shows_warnings(
+    make_csv, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [["A", "B"], ["1"]]
+    main([str(make_csv(rows)), "-o", str(tmp_path / "w")])
+    assert "Uwaga: 1 wiersz ma mniej pól" in capsys.readouterr().out
+
+
+def test_report_shows_near_duplicate_groups_without_note_when_all_fit(
+    make_csv, tmp_path: Path
+) -> None:
+    rows = [["Firma"], ["Alfa Sp. z o.o."], ["ALFA SP Z OO"]]
+    html = render_report(run_check(make_csv(rows), None, RunOptions(tmp_path / "wynik")))
+    assert "ALFA SP Z OO" in html
+    assert "Pokazano" not in html

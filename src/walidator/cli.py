@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NoReturn, TextIO
 
 from walidator import APP_NAME, __version__
-from walidator.engine import RunOptions, analyze, run_check
+from walidator.engine import Analysis, RunOptions, analyze, run_check
 from walidator.errors import CancelledError, WalidatorError
 from walidator.logs import LOG_FILE, setup_logging
 from walidator.report import num, pct, seconds
@@ -33,6 +33,7 @@ _ARGPARSE_MESSAGES = (
         r"opcja \1: niedozwolona wartość \2 (dozwolone: \3)",
     ),
     (r"argument (\S+): ignored explicit argument (.*)", r"opcja \1 nie przyjmuje wartości \2"),
+    (r"argument (\S+): not allowed with argument (\S+)", r"opcji \1 nie można łączyć z \2"),
 )
 
 DESCRIPTION = f"""\
@@ -178,17 +179,22 @@ def _prepare_streams() -> None:
 
 def _run(args: argparse.Namespace, out: _Printer) -> int:
     rules = load_rules(args.reguly) if args.reguly else None
-    if args.tylko_analiza or args.zapisz_reguly or args.szczegolowo:
-        analysis = analyze(args.plik, args.arkusz, rules)
+
+    def show_analysis(analysis: Analysis) -> None:
+        if not (args.tylko_analiza or args.zapisz_reguly or args.szczegolowo):
+            return
         out.header(f"{APP_NAME} {__version__} – {args.plik.name} ({analysis.info.description})")
         if args.tylko_analiza or args.szczegolowo:
             _print_columns(analysis, out)
         if args.zapisz_reguly:
             save_rules(analysis.rules, args.zapisz_reguly)
             out.line(f"Zapisano reguły: {args.zapisz_reguly}")
-        if args.tylko_analiza:
-            return EXIT_OK
-        rules = analysis.rules if rules is None else rules
+
+    if args.tylko_analiza:
+        analysis = analyze(args.plik, args.arkusz, rules)
+        show_analysis(analysis)
+        _print_warnings(analysis.warnings, out)
+        return EXIT_OK
 
     options = RunOptions(
         output_dir=args.wyjscie or args.plik.resolve().parent / "wynik",
@@ -199,7 +205,7 @@ def _run(args: argparse.Namespace, out: _Printer) -> int:
     )
     progress = _ProgressBar(sys.stderr) if not args.cicho and sys.stderr.isatty() else None
     try:
-        result = run_check(args.plik, rules, options, progress=progress)
+        result = run_check(args.plik, rules, options, progress, on_analysis=show_analysis)
     except CancelledError:
         return EXIT_ERROR
     finally:
@@ -240,7 +246,7 @@ class _ProgressBar:
         self.stream.flush()
 
 
-def _print_columns(analysis, out: _Printer) -> None:
+def _print_columns(analysis: Analysis, out: _Printer) -> None:
     out.line(f"{'Kolumna':<26} {'Typ':<18} {'Wymagane':<9} {'Unikalne':<9} Wykryto na podstawie")
     for name, rule in analysis.rules.columns.items():
         out.line(
@@ -249,9 +255,12 @@ def _print_columns(analysis, out: _Printer) -> None:
         )
     if analysis.rules.similarity_key:
         out.line(f"Klucz podobieństwa: {analysis.rules.similarity_key}")
-    for warning in analysis.warnings:
-        out.line(f"Uwaga: {warning}")
     out.line()
+
+
+def _print_warnings(warnings: list[str], out: _Printer) -> None:
+    for warning in warnings:
+        out.line(f"Uwaga: {warning}")
 
 
 def _print_summary(result: RunResult, out: _Printer, verbose: bool) -> None:
@@ -275,6 +284,9 @@ def _print_summary(result: RunResult, out: _Printer, verbose: bool) -> None:
         out.line("\nPierwsze problemy:")
         for problem in result.problems[:10]:
             out.line(f"  wiersz {problem.row:>6}  {problem.column[:20]:<20}  {problem.reason}")
+    if result.warnings:
+        out.line()
+        _print_warnings(result.warnings, out)
     out.line("\nPliki wynikowe:")
     for path in (result.outputs.clean, result.outputs.rejected, result.outputs.report):
         if path:

@@ -162,3 +162,42 @@ def test_sample_rules_files_are_valid() -> None:
     folder = Path(__file__).resolve().parent.parent / "przyklady"
     for path in folder.glob("reguly_*.json"):
         assert load_rules(path).columns
+
+
+# --- regressions -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("column_type", "key", "value"),
+    [
+        ("kwota", "min", "NaN"),
+        ("kwota", "max", "sNaN"),
+        ("kwota", "min", float("inf")),
+        ("kwota", "max", float("nan")),
+        ("liczba_calkowita", "max", "1e9999999"),
+        ("kwota", "min", "-1e40"),
+        ("tekst", "max", "Infinity"),
+        ("kwota", "max", "1" * 50),
+    ],
+)
+def test_bounds_must_be_finite_and_reasonable(column_type: str, key: str, value: object) -> None:
+    problems = problems_of({"kolumny": {"A": {"typ": column_type, key: value}}})
+    assert len(problems) == 1
+    assert "rozsądną liczbą" in problems[0]
+
+
+def test_huge_bounds_from_json_text_are_rejected_quickly(tmp_path: Path) -> None:
+    path = tmp_path / "reguly.json"
+    path.write_text(
+        '{"kolumny": {"A": {"typ": "kwota", "min": 1e400, "max": "1e9999999"}}}', encoding="utf-8"
+    )
+    with pytest.raises(RulesError) as error:
+        load_rules(path)
+    assert len(error.value.problems) == 2
+
+
+def test_suggestions_end_with_a_single_question_mark() -> None:
+    problems = problems_of({"kolumny": {"A": {"typ": "emial", "wymagny": True}}})
+    assert problems
+    assert not any("?." in problem for problem in problems)
+    assert any(problem.endswith("Czy chodziło o „wymagane”?") for problem in problems)

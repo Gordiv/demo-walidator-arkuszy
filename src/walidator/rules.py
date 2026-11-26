@@ -9,11 +9,12 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
-from walidator.errors import RulesError
+from walidator.errors import OutputError, RulesError
 from walidator.model import RANGE_TYPES, Bound, ColumnRule, ColumnType, RuleSet, TextCase
 from walidator.validators import InvalidValue, parse_date
 
 FORMAT_VERSION = 1
+MAX_BOUND_EXPONENT = 30  # "min"/"max" between 1e-30 and 1e30 in size
 _TOP_KEYS = ("wersja", "opis", "usun_duplikaty", "klucz_podobienstwa", "kolumny")
 _COLUMN_KEYS = (
     "typ",
@@ -90,7 +91,7 @@ def _parse_column(name: str, spec: Any, problems: list[str]) -> ColumnRule | Non
     type_name = spec.get("typ", ColumnType.TEXT.value)
     if type_name not in {kind.value for kind in ColumnType}:
         problems.append(
-            f"Nieznany typ „{type_name}” {where}{_suggest(type_name, _TYPE_NAMES)}. "
+            f"Nieznany typ „{type_name}” {where}.{_suggest(type_name, _TYPE_NAMES)} "
             f"Dozwolone: {_TYPES}."
         )
         return None
@@ -150,10 +151,18 @@ def _parse_bound(
         problems.append(f"Pole {where} musi być liczbą.")
         return None
     try:
-        return Decimal(str(value).replace(",", "."))
+        number = Decimal(str(value).replace(",", "."))
     except InvalidOperation:
         problems.append(f"Pole {where} musi być liczbą, a jest: {value!r}.")
         return None
+    # NaN, infinity and numbers like 1e9999999 would break comparisons or hang the report.
+    digits = number.as_tuple().digits if number.is_finite() else ()
+    if not number.is_finite() or abs(number.adjusted()) > MAX_BOUND_EXPONENT or len(digits) > 30:
+        problems.append(
+            f"Pole {where} musi być rozsądną liczbą (np. 0 albo 100000), a jest: {value!r}."
+        )
+        return None
+    return number
 
 
 def _expect[T](
@@ -173,12 +182,12 @@ def _expect[T](
 def _check_keys(data: dict, known: tuple[str, ...], where: str, problems: list[str]) -> None:
     for key in data:
         if key not in known:
-            problems.append(f"Nieznane pole „{key}” {where}{_suggest(key, known)}.")
+            problems.append(f"Nieznane pole „{key}” {where}.{_suggest(key, known)}")
 
 
 def _suggest(word: str, options: list[str] | tuple[str, ...]) -> str:
     match = get_close_matches(str(word), options, n=1, cutoff=0.6)
-    return f" – czy chodziło o „{match[0]}”?" if match else ""
+    return f" Czy chodziło o „{match[0]}”?" if match else ""
 
 
 # --- saving ----------------------------------------------------------------------------------
@@ -218,5 +227,18 @@ def _number(value: Decimal) -> int | float:
 
 
 def save_rules(rules: RuleSet, path: str | Path) -> None:
+    path = Path(path)
     text = json.dumps(rules_to_dict(rules), ensure_ascii=False, indent=2)
-    Path(path).write_text(text + "\n", encoding="utf-8")
+    if path.is_dir():
+        raise OutputError(
+            f"„{path}” to folder. Podaj nazwę pliku reguł, np. {path / 'reguly.json'}."
+        )
+    if not path.parent.is_dir():
+        raise OutputError(f"Nie można zapisać reguł: folder „{path.parent}” nie istnieje.")
+    try:
+        path.write_text(text + "\n", encoding="utf-8")
+    except OSError as error:
+        raise OutputError(
+            f"Nie można zapisać pliku reguł {path.name}: brak dostępu albo plik jest otwarty "
+            f"w innym programie ({error.strerror or error})."
+        ) from error
