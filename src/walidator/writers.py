@@ -12,12 +12,20 @@ from typing import IO, Protocol
 import xlsxwriter
 
 from walidator.cleaners import as_text
+from walidator.errors import OutputError
 from walidator.model import ColumnRule, ColumnType
 from walidator.processing import Cell
+from walidator.validators import EXCEL_DIGITS, accepts
 
 ROW_NUMBER_HEADER = "Nr wiersza"
 REASONS_HEADER = "Powody odrzucenia"
 EXCEL_TEXT_LIMIT = 32_767
+XLSX_MAX_ROWS = 1_048_576  # rows of one Excel sheet, the header included
+
+# Spreadsheets run CSV cells starting with these characters as formulas.
+_FORMULA_START = "=+-@\t\r"
+# Valid values of these types are safe as they are ("-12,50", "+48 600 123 456").
+_SAFE_TYPES = frozenset({ColumnType.INTEGER, ColumnType.DECIMAL, ColumnType.PHONE})
 
 _CLEAN_HEADER_COLOR = "#1F4E8C"
 _REJECTED_HEADER_COLOR = "#9B2C2C"
@@ -40,11 +48,15 @@ _WORKBOOK_OPTIONS = {
 
 
 class CleanWriter(Protocol):
+    truncated_cells: int
+
     def write(self, cells: Sequence[Cell]) -> None: ...
     def close(self) -> None: ...
 
 
 class RejectedWriter(Protocol):
+    truncated_cells: int
+
     def write(
         self,
         row_number: int,
@@ -59,28 +71,47 @@ def join_reasons(cell_reasons: dict[int, str], row_reasons: Sequence[str]) -> st
     return "; ".join([*(cell_reasons[index] for index in sorted(cell_reasons)), *row_reasons])
 
 
+def neutralize_formula(text: str) -> str:
+    """Prefixes an apostrophe, so a spreadsheet shows the text instead of running it."""
+    return "'" + text if text and text[0] in _FORMULA_START else text
+
+
 # --- CSV -------------------------------------------------------------------------------------
 
 
 class _CsvBase:
+    truncated_cells = 0  # CSV keeps texts of any length
+
     def __init__(self, path: Path, headers: Sequence[str], delimiter: str) -> None:
         # UTF-8 with BOM, so Excel shows Polish letters correctly when the file is double-clicked
         self._handle: IO[str] = path.open("w", encoding="utf-8-sig", newline="")
         self._writer = csv.writer(self._handle, delimiter=delimiter)
-        self._writer.writerow(headers)
+        self._writer.writerow([neutralize_formula(header) for header in headers])
 
     def close(self) -> None:
         self._handle.close()
 
 
 class CsvCleanWriter(_CsvBase):
+    def __init__(self, path: Path, rules: Sequence[ColumnRule], delimiter: str) -> None:
+        super().__init__(path, [rule.name for rule in rules], delimiter)
+        # Accepted rows hold only valid values, so numbers and phones never need the prefix.
+        self._text_columns = [i for i, rule in enumerate(rules) if rule.type not in _SAFE_TYPES]
+
     def write(self, cells: Sequence[Cell]) -> None:
-        self._writer.writerow([cell.text for cell in cells])
+        texts = [cell.text for cell in cells]
+        for index in self._text_columns:  # inlined neutralize_formula: this runs for every cell
+            text = texts[index]
+            if text and text[0] in _FORMULA_START:
+                texts[index] = "'" + text
+        self._writer.writerow(texts)
 
 
 class CsvRejectedWriter(_CsvBase):
-    def __init__(self, path: Path, headers: Sequence[str], delimiter: str) -> None:
-        super().__init__(path, [ROW_NUMBER_HEADER, *headers, REASONS_HEADER], delimiter)
+    def __init__(self, path: Path, rules: Sequence[ColumnRule], delimiter: str) -> None:
+        names = [rule.name for rule in rules]
+        super().__init__(path, [ROW_NUMBER_HEADER, *names, REASONS_HEADER], delimiter)
+        self._types = [rule.type for rule in rules]
 
     def write(
         self,
@@ -89,11 +120,26 @@ class CsvRejectedWriter(_CsvBase):
         cell_reasons: dict[int, str],
         row_reasons: Sequence[str],
     ) -> None:
-        reasons = join_reasons(cell_reasons, row_reasons)
-        self._writer.writerow([row_number, *map(as_text, raw), reasons])
+        values = [
+            text if kind in _SAFE_TYPES and accepts(kind, text) else neutralize_formula(text)
+            for kind, text in zip(self._types, map(as_text, raw), strict=True)
+        ]
+        reasons = neutralize_formula(join_reasons(cell_reasons, row_reasons))
+        self._writer.writerow([row_number, *values, reasons])
 
 
 # --- XLSX ------------------------------------------------------------------------------------
+
+
+def fits_excel_number(value: int | float | Decimal) -> bool:
+    """False for numbers Excel would round: more than 15 significant digits."""
+    if isinstance(value, float):
+        return True
+    if isinstance(value, int):
+        return len(str(abs(value))) <= EXCEL_DIGITS
+    _, digits, exponent = value.as_tuple()
+    trailing_zeros = exponent if isinstance(exponent, int) and exponent > 0 else 0
+    return len(digits) + trailing_zeros <= EXCEL_DIGITS
 
 
 class _XlsxBase:
@@ -113,6 +159,16 @@ class _XlsxBase:
         self._sheet.freeze_panes(1, 0)
         self._width = len(headers)
         self._row = 1
+        self.truncated_cells = 0
+
+    def _check_room(self) -> None:
+        """Stops before a row would be lost: XlsxWriter silently skips rows past the limit."""
+        if self._row >= XLSX_MAX_ROWS:
+            limit = f"{XLSX_MAX_ROWS:,}".replace(",", " ")
+            raise OutputError(
+                f"Arkusz XLSX mieści najwyżej {limit} wierszy, a wyników jest więcej. "
+                "Wybierz format wyniku CSV (w wierszu poleceń: --format csv)."
+            )
 
     def _put(self, column: int, value: object, style: object = None) -> None:
         """Writes one cell with its native Excel type; empty values leave the cell blank."""
@@ -122,12 +178,19 @@ class _XlsxBase:
                 sheet.write_blank(row, column, None, style)
         elif isinstance(value, bool):
             sheet.write_string(row, column, "tak" if value else "nie", style)
-        elif isinstance(value, int | float | Decimal):
+        elif isinstance(value, int | float | Decimal) and fits_excel_number(value):
             sheet.write_number(row, column, float(value), style)
+        elif isinstance(value, int | Decimal):  # too long for an Excel number: exact text
+            sheet.write_string(
+                row, column, f"{value:f}" if isinstance(value, Decimal) else str(value), style
+            )
         elif isinstance(value, date):
             sheet.write_datetime(row, column, value, style or self._date)
         else:
-            sheet.write_string(row, column, str(value)[:EXCEL_TEXT_LIMIT], style)
+            text = str(value)
+            if len(text) > EXCEL_TEXT_LIMIT:
+                self.truncated_cells += 1
+            sheet.write_string(row, column, text[:EXCEL_TEXT_LIMIT], style)
 
     def close(self) -> None:
         if self._row > 1:
@@ -150,9 +213,14 @@ class XlsxCleanWriter(_XlsxBase):
         return None
 
     def write(self, cells: Sequence[Cell]) -> None:
+        self._check_room()
         for column, (cell, style) in enumerate(zip(cells, self._styles, strict=True)):
             value = cell.value
-            native = isinstance(value, int | Decimal | date) and not isinstance(value, bool)
+            native = isinstance(value, date) or (
+                isinstance(value, int | Decimal)
+                and not isinstance(value, bool)
+                and fits_excel_number(value)  # longer numbers stay exact as text
+            )
             self._put(column, value if native else cell.text, style)
         self._row += 1
 
@@ -176,6 +244,7 @@ class XlsxRejectedWriter(_XlsxBase):
         cell_reasons: dict[int, str],
         row_reasons: Sequence[str],
     ) -> None:
+        self._check_room()
         self._put(0, row_number)
         for index, value in enumerate(raw):
             reason = cell_reasons.get(index)
@@ -199,10 +268,9 @@ def open_writers(
     """Creates both writers; ``kind`` is "csv" or "xlsx"."""
     if kind == "xlsx":
         return XlsxCleanWriter(clean_path, rules), XlsxRejectedWriter(rejected_path, rules)
-    headers = [rule.name for rule in rules]
-    clean = CsvCleanWriter(clean_path, headers, delimiter)
+    clean = CsvCleanWriter(clean_path, rules, delimiter)
     try:
-        rejected = CsvRejectedWriter(rejected_path, headers, delimiter)
+        rejected = CsvRejectedWriter(rejected_path, rules, delimiter)
     except OSError:
         clean.close()
         raise

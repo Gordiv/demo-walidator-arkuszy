@@ -8,13 +8,11 @@ from html import escape
 from pathlib import Path
 
 from walidator import APP_NAME, __version__
+from walidator.cleaners import plural
 from walidator.errors import OutputError
 from walidator.model import ColumnRule, ColumnType
 from walidator.results import ColumnStats, RunResult
 from walidator.validators import format_value
-
-MAX_PROBLEM_ROWS = 500
-MAX_NEAR_DUPLICATE_GROUPS = 30
 
 
 def write_report(result: RunResult, path: Path) -> None:
@@ -22,7 +20,12 @@ def write_report(result: RunResult, path: Path) -> None:
         path.write_text(render_report(result), encoding="utf-8")
     except PermissionError as error:
         raise OutputError(
-            f"Nie można zapisać raportu {path.name} – plik jest zablokowany."
+            f"Nie można zapisać raportu {path.name} – plik jest otwarty w innym programie "
+            "albo folder nie pozwala na zapis."
+        ) from error
+    except OSError as error:
+        raise OutputError(
+            f"Nie można zapisać raportu {path.name}: {error.strerror or error}"
         ) from error
 
 
@@ -63,15 +66,6 @@ def pct(part: int, whole: int, digits: int = 1) -> str:
 
 def seconds(value: float) -> str:
     return f"{value:.2f}".replace(".", ",") + "\u00a0s"
-
-
-def _plural(count: int, one: str, few: str, many: str) -> str:
-    """Polish plural forms: 1 wiersz, 2 wiersze, 5 wierszy, 22 wiersze."""
-    if count == 1:
-        return one
-    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
-        return few
-    return many
 
 
 def _shown(value: object) -> str:
@@ -146,7 +140,7 @@ def _summary(result: RunResult) -> str:
             "Odrzucone",
             num(result.rejected),
             f"w tym {num(result.duplicates)} "
-            + _plural(result.duplicates, "duplikat", "duplikaty", "duplikatów"),
+            + plural(result.duplicates, "duplikat", "duplikaty", "duplikatów"),
             "bad",
         ),
         ("Problemy", num(result.problems_total), "błędnych komórek i wierszy", "warn"),
@@ -336,7 +330,7 @@ def _fix_examples(columns: list[ColumnStats]) -> str:
         )
         groups.append(
             f'<div class="fixes"><h3>{escape(stats.name)} <span>{num(stats.fixed)} '
-            f"{_plural(stats.fixed, 'poprawka', 'poprawki', 'poprawek')}</span></h3>"
+            f"{plural(stats.fixed, 'poprawka', 'poprawki', 'poprawek')}</span></h3>"
             f"<ul>{examples}</ul></div>"
         )
     if not groups:
@@ -362,9 +356,9 @@ def _problems(result: RunResult) -> str:
         f"<td><code>{_cell(problem.value)}</code></td>"
         f'<td><span class="tag">{escape(problem.category)}</span> '
         f"{escape(problem.reason)}</td></tr>"
-        for problem in result.problems[:MAX_PROBLEM_ROWS]
+        for problem in result.problems
     )
-    shown = min(len(result.problems), MAX_PROBLEM_ROWS)
+    shown = len(result.problems)  # the result keeps only the first ones
     note = (
         f'<p class="note">Pokazano {num(shown)} z {num(result.problems_total)} problemów. Pełna '
         f"lista jest w pliku <b>{escape(result.outputs.rejected.name)}</b>.</p>"
@@ -393,13 +387,16 @@ def _near_duplicates(result: RunResult) -> str:
             for number, text in group.rows[:6]
         )
         + "</ul></li>"
-        for group in result.near_duplicates[:MAX_NEAR_DUPLICATE_GROUPS]
+        for group in result.near_duplicates
     )
+    shown, total = len(result.near_duplicates), result.near_duplicate_groups
+    more = f" Pokazano {num(shown)} z {num(total)} grup." if total > shown else ""
     return f"""
 <section class="panel">
   <h2>Podobne rekordy <small>kolumna „{escape(result.similarity_key or "")}”</small></h2>
-  <p class="note">Te wiersze przeszły walidację, ale mają prawie taką samą wartość klucza (bez
-  wielkości liter, polskich znaków i formy prawnej). Warto sprawdzić, czy to ten sam klient.</p>
+  <p class="note">Te wiersze przeszły walidację, ale mają taką samą wartość klucza po pominięciu
+  wielkości liter, polskich znaków, spacji, interpunkcji i formy prawnej. Warto sprawdzić,
+  czy to ten sam klient.{more}</p>
   <ol class="near">{groups}</ol>
 </section>"""
 

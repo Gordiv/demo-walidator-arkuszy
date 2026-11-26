@@ -14,10 +14,10 @@ from typing import Literal, NamedTuple
 
 from xlsxwriter.exceptions import FileCreateError
 
-from walidator.cleaners import as_text
+from walidator.cleaners import as_text, plural
 from walidator.detection import guess_column, suggest_similarity_key
 from walidator.errors import CancelledError, OutputError, RulesError
-from walidator.model import ColumnRule, RuleSet
+from walidator.model import ColumnRule, ColumnType, RuleSet
 from walidator.processing import (
     BAD_STRUCTURE,
     DUPLICATE_ROW,
@@ -26,10 +26,17 @@ from walidator.processing import (
     ColumnProcessor,
     similarity_key,
 )
-from walidator.readers import SourceInfo, TableSource, open_table
-from walidator.report import write_report
-from walidator.results import ColumnStats, NearDuplicateGroup, OutputPaths, Problem, RunResult
-from walidator.writers import CleanWriter, RejectedWriter, open_writers
+from walidator.readers import ENCODING_NAMES, SourceInfo, TableSource, open_table
+from walidator.report import num, write_report
+from walidator.results import (
+    MAX_NEAR_DUPLICATE_GROUPS,
+    ColumnStats,
+    NearDuplicateGroup,
+    OutputPaths,
+    Problem,
+    RunResult,
+)
+from walidator.writers import EXCEL_TEXT_LIMIT, CleanWriter, RejectedWriter, open_writers
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +45,6 @@ ProgressCallback = Callable[[float | None, int], None]
 
 SAMPLE_ROWS = 500
 PROGRESS_EVERY = 2_000
-MAX_NEAR_DUPLICATE_GROUPS = 100
 
 
 @dataclass(slots=True)
@@ -141,14 +147,19 @@ def run_check(
     options: RunOptions,
     progress: ProgressCallback | None = None,
     cancel: threading.Event | None = None,
+    *,
+    on_analysis: Callable[[Analysis], None] | None = None,
 ) -> RunResult:
     """Checks the whole file and writes the cleaned file, rejected rows and the HTML report.
 
     ``rules`` may be partial (e.g. loaded from JSON); columns it does not mention are detected.
+    ``on_analysis`` sees the detected columns before the check starts (the file is read once).
     """
     started = time.perf_counter()
     with open_table(path, options.sheet) as source:
         analysis = _analyze_source(source, rules)
+        if on_analysis:
+            on_analysis(analysis)
         result = _run(source, analysis, options, progress, cancel)
     result.elapsed = time.perf_counter() - started
     if options.write_report and result.outputs.report:
@@ -190,7 +201,10 @@ def _run(
         warnings=analysis.warnings,
     )
     checker = RowChecker(rules, analysis.rules, decimal_separator="." if delimiter == "," else ",")
-    clean, rejected = _open_outputs(kind, paths, rules, delimiter)
+    _check_replaceable(paths)
+    # Results go to temporary files first, so an error never leaves old results half-written.
+    temp = OutputPaths(_temp_path(paths.clean), _temp_path(paths.rejected), None)
+    clean, rejected = _open_outputs(kind, temp, rules, delimiter)
     try:
         for number, raw in source.rows():
             checker.check(number, raw, result, clean, rejected)
@@ -201,10 +215,18 @@ def _run(
                     progress(_fraction(result.total, info.estimated_rows), result.total)
     except BaseException:
         _close_quietly(clean, rejected)
-        _remove(paths.clean, paths.rejected)
+        _remove(temp.clean, temp.rejected)
         raise
-    _close_outputs(clean, rejected, paths)
+    try:
+        _close_outputs(clean, rejected, temp)
+        _check_replaceable(paths)
+        for done, final in ((temp.clean, paths.clean), (temp.rejected, paths.rejected)):
+            _replace(done, final)
+    except BaseException:
+        _remove(temp.clean, temp.rejected)
+        raise
     checker.finish(result)
+    _add_output_warnings(result, source, clean, rejected)
     if progress:
         progress(1.0, result.total)
     return result
@@ -212,6 +234,27 @@ def _run(
 
 def _fraction(done: int, estimated: int | None) -> float | None:
     return min(done / estimated, 0.99) if estimated else None
+
+
+def _add_output_warnings(
+    result: RunResult, source: TableSource, clean: CleanWriter, rejected: RejectedWriter
+) -> None:
+    if source.unreadable_chars:
+        encoding = ENCODING_NAMES.get(source.info.encoding or "", source.info.encoding)
+        count = source.unreadable_chars
+        chars = plural(count, "znak nie pasuje", "znaki nie pasują", "znaków nie pasuje")
+        result.warnings.append(
+            f"{num(count)} {chars} do kodowania {encoding} i zastąpiono je znakiem „�” "
+            f"(pierwszy raz: wiersz {source.first_unreadable_row}). Plik ma prawdopodobnie "
+            "mieszane kodowanie – zapisz go ponownie w UTF-8 i sprawdź jeszcze raz."
+        )
+    truncated = clean.truncated_cells + rejected.truncated_cells
+    if truncated:
+        cells = plural(truncated, "komórka miała", "komórki miały", "komórek miało")
+        result.warnings.append(
+            f"{num(truncated)} {cells} ponad {num(EXCEL_TEXT_LIMIT)} znaków – w pliku XLSX tekst "
+            "skrócono do tej długości (Excel nie mieści więcej). Pełny tekst zachowuje wynik w CSV."
+        )
 
 
 class Issue(NamedTuple):
@@ -238,6 +281,11 @@ class RowChecker:
         key = rule_set.similarity_key
         self.similarity_index = names.index(key) if key in names else None
         self.similar: dict[str, list[tuple[int, str]]] = {}
+        self.short_rows = 0
+        self.first_short_row: int | None = None
+        self.dropped_times = dict.fromkeys(
+            (index for index, rule in enumerate(rules) if rule.type is ColumnType.DATE), 0
+        )
 
     def check(
         self,
@@ -249,6 +297,9 @@ class RowChecker:
     ) -> None:
         result.total += 1
         extra = [value for value in raw[self.width :] if value not in (None, "")]
+        if len(raw) < self.width:  # missing trailing fields are read as empty cells
+            self.short_rows += 1
+            self.first_short_row = self.first_short_row or number
         raw = raw[: self.width] + [None] * (self.width - len(raw))
         cells = [
             processor.process(value) for processor, value in zip(self.processors, raw, strict=True)
@@ -289,13 +340,17 @@ class RowChecker:
                 reason = f"Wartość już wystąpiła w wierszu {seen[cell.text]}"
                 issues.append(Issue(index, NOT_UNIQUE, reason))
         if field_count:
-            reason = f"Wiersz ma {field_count} pól zamiast {self.width}"
+            fields = plural(field_count, "pole", "pola", "pól")
+            reason = f"Wiersz ma {field_count} {fields} zamiast {self.width}"
             issues.append(Issue(None, BAD_STRUCTURE, reason))
         return issues
 
     def _accept(self, number: int, cells: list[Cell], result: RunResult) -> None:
         if any(cell.changed for cell in cells):
             result.fixed += 1
+        for index in self.dropped_times:
+            if cells[index].time_dropped:
+                self.dropped_times[index] += 1
         for index, seen in self.unique_seen.items():
             if text := cells[index].text:
                 seen.setdefault(text, number)
@@ -341,14 +396,32 @@ class RowChecker:
                 stats.record_fix(as_text(original), cell.text)
 
     def finish(self, result: RunResult) -> None:
+        self._add_warnings(result)
         groups = [rows for rows in self.similar.values() if len(rows) > 1]
         result.near_duplicate_rows = sum(len(rows) for rows in groups)
+        result.near_duplicate_groups = len(groups)
         if self.similarity_index is None:
             return
         column = self.rules[self.similarity_index].name
         result.near_duplicates = [
             NearDuplicateGroup(column, rows) for rows in groups[:MAX_NEAR_DUPLICATE_GROUPS]
         ]
+
+    def _add_warnings(self, result: RunResult) -> None:
+        if self.short_rows:
+            rows = plural(self.short_rows, "wiersz ma", "wiersze mają", "wierszy ma")
+            result.warnings.append(
+                f"{num(self.short_rows)} {rows} mniej pól niż nagłówek (pierwszy: wiersz "
+                f"{self.first_short_row}) – brakujące pola potraktowano jako puste."
+            )
+        for index, count in self.dropped_times.items():
+            if count:
+                rule = self.rules[index]
+                cells = plural(count, "komórce", "komórkach", "komórkach")
+                result.warnings.append(
+                    f"Kolumna „{rule.name}”: w {num(count)} {cells} była też godzina – "
+                    "w czystym pliku zapisano samą datę."
+                )
 
 
 # --- output files ----------------------------------------------------------------------------
@@ -357,27 +430,57 @@ class RowChecker:
 def _open_outputs(
     kind: str, paths: OutputPaths, rules: Sequence[ColumnRule], delimiter: str
 ) -> tuple[CleanWriter, RejectedWriter]:
+    """Opens the writers on new (temporary) files, so an error here concerns the folder."""
+    folder = paths.clean.parent
     try:
-        paths.clean.parent.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
         return open_writers(kind, paths.clean, paths.rejected, rules, delimiter)
     except PermissionError as error:
         raise OutputError(
-            f"Nie można zapisać wyników w folderze {paths.clean.parent}. Jeśli plik wyniku jest "
-            "otwarty w Excelu, zamknij go i spróbuj ponownie."
+            f"Brak uprawnień do zapisu w folderze {folder}. Wybierz inny folder na wyniki."
         ) from error
     except OSError as error:
-        raise OutputError(f"Nie można utworzyć plików wyniku: {error.strerror or error}") from error
+        raise OutputError(
+            f"Nie można utworzyć plików wyniku w folderze {folder}: {error.strerror or error}"
+        ) from error
 
 
 def _close_outputs(clean: CleanWriter, rejected: RejectedWriter, paths: OutputPaths) -> None:
+    for writer, path in ((clean, paths.clean), (rejected, paths.rejected)):
+        try:
+            writer.close()
+        except (OSError, FileCreateError) as error:
+            raise OutputError(f"Nie można zapisać pliku {path.name}: {error}") from error
+
+
+def _temp_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.tmp{path.suffix}")
+
+
+def _locked_message(path: Path) -> str:
+    return (
+        f"Plik {path.name} jest otwarty w innym programie (np. w Excelu) albo zablokowany. "
+        "Zamknij go i spróbuj ponownie – poprzednie wyniki nie zostały zmienione."
+    )
+
+
+def _check_replaceable(paths: OutputPaths) -> None:
+    """Fails early when an existing result file is open in another program."""
+    for path in (paths.clean, paths.rejected, paths.report):
+        if path is None or not path.is_file():
+            continue
+        try:
+            with path.open("r+b"):
+                pass
+        except PermissionError as error:
+            raise OutputError(_locked_message(path)) from error
+
+
+def _replace(done: Path, final: Path) -> None:
     try:
-        clean.close()
-        rejected.close()
-    except (PermissionError, FileCreateError) as error:
-        raise OutputError(
-            f"Nie można zapisać {paths.clean.name} – plik jest otwarty w innym programie. "
-            "Zamknij go i spróbuj ponownie."
-        ) from error
+        done.replace(final)
+    except PermissionError as error:
+        raise OutputError(_locked_message(final)) from error
 
 
 def _close_quietly(*writers: CleanWriter | RejectedWriter) -> None:
@@ -389,5 +492,9 @@ def _close_quietly(*writers: CleanWriter | RejectedWriter) -> None:
 
 
 def _remove(*paths: Path) -> None:
+    """Deletes temporary files; a failure here must not hide the error being reported."""
     for path in paths:
-        path.unlink(missing_ok=True)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("Nie udało się usunąć pliku tymczasowego %s", path, exc_info=True)

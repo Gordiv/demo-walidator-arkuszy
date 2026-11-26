@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -12,7 +12,7 @@ from typing import Literal, Self
 
 from python_calamine import CalamineError, CalamineSheet, CalamineWorkbook, PasswordError
 
-from walidator.cleaners import as_text, clean_whitespace
+from walidator.cleaners import as_text, clean_whitespace, plural
 from walidator.detection import detect_delimiter, detect_encoding
 from walidator.errors import FileReadError
 
@@ -20,6 +20,7 @@ SPREADSHEET_SUFFIXES = (".xlsx", ".xlsm", ".xlsb", ".xls", ".ods")
 TEXT_SUFFIXES = (".csv", ".txt", ".tsv")
 SNIFF_BYTES = 64 * 1024
 HEADER_SEARCH_ROWS = 20
+_REPLACEMENT = "�"  # what errors="replace" puts in place of unreadable bytes
 
 Row = list[object]
 
@@ -63,6 +64,9 @@ class TableSource:
         self._workbook: CalamineWorkbook | None = None
         self._sheets: dict[str, CalamineSheet] = {}
         self.info: SourceInfo
+        # Characters of a CSV file that the detected encoding could not read (shown as "�")
+        self.unreadable_chars = 0
+        self.first_unreadable_row: int | None = None
 
     def __enter__(self) -> Self:
         if not self.path.is_file():
@@ -131,6 +135,12 @@ class TableSource:
         info = SourceInfo(
             path=self.path, kind="xlsx", headers=[], header_row=0, sheet=sheet, sheets=sheets
         )
+        if len(sheets) > 1 and self._requested_sheet is None:
+            count = plural(len(sheets), "arkusz", "arkusze", "arkuszy")
+            info.warnings.append(
+                f"Plik ma {len(sheets)} {count} – sprawdzono tylko pierwszy („{sheet}”). "
+                "Inny arkusz można sprawdzić w wierszu poleceń opcją --arkusz NAZWA."
+            )
         self._read_header(info, self._sheet_rows(sheet))
         height = self._sheet(sheet).total_height
         info.estimated_rows = max(height - info.header_row, 0)
@@ -147,8 +157,20 @@ class TableSource:
     # --- rows ----------------------------------------------------------------------------
 
     def _csv_rows(self, encoding: str, delimiter: str) -> Iterator[tuple[int, Row]]:
+        self.unreadable_chars, self.first_unreadable_row = 0, None
         with self.path.open(encoding=encoding, errors="replace", newline="") as handle:
-            yield from enumerate(csv.reader(handle, delimiter=delimiter), start=1)
+            lines = self._count_unreadable(handle)
+            for number, row in enumerate(csv.reader(lines, delimiter=delimiter), start=1):
+                if self.unreadable_chars and self.first_unreadable_row is None:
+                    self.first_unreadable_row = number
+                yield number, row
+
+    def _count_unreadable(self, lines: Iterable[str]) -> Iterator[str]:
+        """Counts "�" put in place of bytes the encoding could not read (mixed encodings)."""
+        for line in lines:
+            if _REPLACEMENT in line:
+                self.unreadable_chars += line.count(_REPLACEMENT)
+            yield line
 
     def _sheet(self, name: str) -> CalamineSheet:
         """Parses a sheet once and keeps it, so the sample and the full pass share the work."""

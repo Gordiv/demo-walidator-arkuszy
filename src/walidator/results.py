@@ -13,6 +13,7 @@ from walidator.readers import SourceInfo
 MAX_FIX_EXAMPLES = 4
 MAX_PROBLEMS = 500
 MAX_DISTINCT_TRACKED = 50_000
+MAX_NEAR_DUPLICATE_GROUPS = 100  # kept in the result and listed in the report
 
 
 @dataclass(slots=True)
@@ -98,6 +99,7 @@ class RunResult:
     problems_total: int = 0
     near_duplicates: list[NearDuplicateGroup] = field(default_factory=list)
     near_duplicate_rows: int = 0
+    near_duplicate_groups: int = 0
     warnings: list[str] = field(default_factory=list)
 
     def add_problem(self, problem: Problem) -> None:
